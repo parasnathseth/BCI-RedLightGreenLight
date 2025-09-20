@@ -248,40 +248,59 @@ def main():
 			elif event.type == pygame.KEYDOWN:
 				if event.key == pygame.K_ESCAPE:
 					running = False
-				elif event.key == pygame.K_r:
+				elif event.key == pygame.K_x:
 					reset_game()
 
-		# Per-frame key handling for hold-to-move (two players)
+		# Per-frame key handling with per-key speed tiers (two players)
 		if not game_over:
 			keys = pygame.key.get_pressed()
-			# Player 1 - W
-			w_down = keys[pygame.K_w]
-			if w_down:
+			# Player 1 - keys QWERTY map to increasing speeds
+			p1_keys = [pygame.K_q, pygame.K_w, pygame.K_e, pygame.K_r, pygame.K_t, pygame.K_y]
+			p1_multipliers = [0.5, 1.0, 1.3, 1.6, 2.0, 2.5]
+			p1_level = -1
+			for idx, k in enumerate(p1_keys):
+				if keys[k]:
+					p1_level = max(p1_level, idx)
+			p1_mult = p1_multipliers[p1_level] if p1_level >= 0 else 0.0
+			current_p1_mult = p1_mult
+			if p1_mult > 0.0:
 				if light_state in ("green", "yellow"):
-					player1_y = max(finish_y, player1_y - MOVE_SPEED * (dt / 1000.0))
+					player1_y = max(finish_y, player1_y - (MOVE_SPEED * p1_mult) * (dt / 1000.0))
 					penalty_timer_p1_ms = 0
 				elif light_state == "red":
 					penalty_timer_p1_ms += dt
-					if penalty_timer_p1_ms >= PENALTY_PERIOD_MS:
-						player1_y = min(player1_y + RED_PENALTY, start_y)
+					# Faster speed → quicker penalties; also scale penalty size
+					period_p1 = max(100, int(PENALTY_PERIOD_MS / max(1.0, p1_mult)))
+					if penalty_timer_p1_ms >= period_p1:
+						player1_y = min(player1_y + int(RED_PENALTY * p1_mult), start_y)
 						penalty_timer_p1_ms = 0
 			else:
 				penalty_timer_p1_ms = 0
-			# Player 2 - Up Arrow
-			up_down = keys[pygame.K_UP]
-			if up_down:
+
+			# Player 2 - keys ASDFGH map to increasing speeds
+			p2_keys = [pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_f, pygame.K_g, pygame.K_h]
+			p2_multipliers = [0.5, 1.0, 1.3, 1.6, 2.0, 2.5]
+			p2_level = -1
+			for idx, k in enumerate(p2_keys):
+				if keys[k]:
+					p2_level = max(p2_level, idx)
+			p2_mult = p2_multipliers[p2_level] if p2_level >= 0 else 0.0
+			current_p2_mult = p2_mult
+			if p2_mult > 0.0:
 				if light_state in ("green", "yellow"):
-					player2_y = max(finish_y, player2_y - MOVE_SPEED * (dt / 1000.0))
+					player2_y = max(finish_y, player2_y - (MOVE_SPEED * p2_mult) * (dt / 1000.0))
 					penalty_timer_p2_ms = 0
 				elif light_state == "red":
 					penalty_timer_p2_ms += dt
-					if penalty_timer_p2_ms >= PENALTY_PERIOD_MS:
-						player2_y = min(player2_y + RED_PENALTY, start_y)
+					period_p2 = max(100, int(PENALTY_PERIOD_MS / max(1.0, p2_mult)))
+					if penalty_timer_p2_ms >= period_p2:
+						player2_y = min(player2_y + int(RED_PENALTY * p2_mult), start_y)
 						penalty_timer_p2_ms = 0
 			else:
 				penalty_timer_p2_ms = 0
-			w_was_down = w_down
-			up_was_down = up_down
+
+			w_was_down = any(keys[k] for k in p1_keys)
+			up_was_down = any(keys[k] for k in p2_keys)
 
 		# Win check: reached or crossed finish line (either player)
 		if not game_over:
@@ -306,11 +325,25 @@ def main():
 				# Immediate punishment when switching into red while holding
 				if prev_light_state != "red" and light_state == "red":
 					keys_now = pygame.key.get_pressed()
-					if keys_now[pygame.K_w]:
-						player1_y = min(player1_y + RED_PENALTY, start_y)
+					p1_keys_now = [pygame.K_q, pygame.K_w, pygame.K_e, pygame.K_r, pygame.K_t, pygame.K_y]
+					p2_keys_now = [pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_f, pygame.K_g, pygame.K_h]
+					p1_multipliers = [0.5, 1.0, 1.3, 1.6, 2.0, 2.5]
+					p2_multipliers = [0.5, 1.0, 1.3, 1.6, 2.0, 2.5]
+					p1_level_now = -1
+					for idx, k in enumerate(p1_keys_now):
+						if keys_now[k]:
+							p1_level_now = max(p1_level_now, idx)
+					p2_level_now = -1
+					for idx, k in enumerate(p2_keys_now):
+						if keys_now[k]:
+							p2_level_now = max(p2_level_now, idx)
+					if p1_level_now >= 0:
+						p1_mult_now = p1_multipliers[p1_level_now]
+						player1_y = min(player1_y + int(RED_PENALTY * p1_mult_now), start_y)
 						penalty_timer_p1_ms = 0
-					if keys_now[pygame.K_UP]:
-						player2_y = min(player2_y + RED_PENALTY, start_y)
+					if p2_level_now >= 0:
+						p2_mult_now = p2_multipliers[p2_level_now]
+						player2_y = min(player2_y + int(RED_PENALTY * p2_mult_now), start_y)
 						penalty_timer_p2_ms = 0
 			prev_light_state = light_state
 
@@ -338,7 +371,7 @@ def main():
 
 		# HUD
 		if light_state == "green":
-			state_text = "GREEN - P1: W  |  P2: Up Arrow"
+			state_text = "GREEN - P1: QWERTY  |  P2: ASDFGH"
 			state_color = GREEN
 		elif light_state == "red":
 			state_text = "RED - Do NOT move"
@@ -348,7 +381,7 @@ def main():
 			state_color = YELLOW
 		screen.blit(font_small.render(state_text, True, state_color), (10, HEIGHT - 34))
 		# Controls hint
-		controls_text = "R: Restart   ESC: Quit"
+		controls_text = "X: Restart   ESC: Quit"
 		screen.blit(font_small.render(controls_text, True, BLACK), (WIDTH - 280, HEIGHT - 34))
 
 		# Timer display (MM:SS.t)
@@ -361,7 +394,26 @@ def main():
 		if game_over:
 			if win:
 				show_center_text(screen, f"{winner_label} Wins!", GREEN, font_big)
-				screen.blit(font_small.render("Press R to restart", True, BLACK), (10, 40))
+				screen.blit(font_small.render("Press X to restart", True, BLACK), (10, 40))
+
+		# Speed bars under timer
+		bar_w = int(WIDTH * 0.25)
+		bar_h = 10
+		bar_x = 10
+		p1_bar_y = 40
+		p2_bar_y = 60
+		max_mult = 2.5
+		# Background bars
+		pygame.draw.rect(screen, (220, 220, 220), (bar_x, p1_bar_y, bar_w, bar_h), border_radius=4)
+		pygame.draw.rect(screen, (220, 220, 220), (bar_x, p2_bar_y, bar_w, bar_h), border_radius=4)
+		# Filled portions
+		p1_fill = int(bar_w * min(1.0, (current_p1_mult if 'current_p1_mult' in locals() else 0.0) / max_mult))
+		p2_fill = int(bar_w * min(1.0, (current_p2_mult if 'current_p2_mult' in locals() else 0.0) / max_mult))
+		pygame.draw.rect(screen, P1_ACCENT, (bar_x, p1_bar_y, p1_fill, bar_h), border_radius=4)
+		pygame.draw.rect(screen, P2_ACCENT, (bar_x, p2_bar_y, p2_fill, bar_h), border_radius=4)
+		# Labels
+		screen.blit(font_small.render(f"P1 Speed", True, P1_ACCENT), (bar_x + bar_w + 10, p1_bar_y - 6))
+		screen.blit(font_small.render(f"P2 Speed", True, P2_ACCENT), (bar_x + bar_w + 10, p2_bar_y - 6))
 
 		pygame.display.flip()
 
