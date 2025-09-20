@@ -21,13 +21,15 @@ def compute_single_band_power(eeg_data: np.ndarray, sfreq: float, band_range, np
         low, high = band_range
         idx = (freqs >= low) & (freqs <= high)
         if np.any(idx):
-            powers[ch] = np.trapezoid(psd[idx], freqs[idx])
+            # np.trapz integrates PSD over the band (area under curve)
+            powers[ch] = np.trapz(psd[idx], freqs[idx])
         else:
             powers[ch] = 0.0
     return powers
 
 
-def main(serial_port: str = None, window_seconds: int = 2, refresh_hz: float = 5.0):
+def main(serial_port: str = None, window_seconds: int = 2, refresh_hz: float = 5.0,
+         y_min: float = 0.0, y_max: float = 100.0):
     band_name = "alpha"
     band_range = (8, 12)
 
@@ -44,6 +46,7 @@ def main(serial_port: str = None, window_seconds: int = 2, refresh_hz: float = 5
     if not eeg_chs:
         eeg_chs = list(range(1, 8 + 1))
 
+    # Matplotlib setup
     plt.ion()
     fig, ax = plt.subplots(figsize=(7, 4))
     bars = ax.bar([0], [0.0], width=0.6)
@@ -51,7 +54,7 @@ def main(serial_port: str = None, window_seconds: int = 2, refresh_hz: float = 5
     ax.set_xticklabels([band_name])
     ax.set_ylabel(f"{band_name.capitalize()} Band Power (a.u.)")
     ax.set_title(f"Real-time {band_name.capitalize()} Power (Avg across channels)")
-    ax.set_ylim(0, 1)
+    ax.set_ylim(y_min, y_max)  # fixed scale
 
     samples_needed = max(int(window_seconds * sfreq), 64)
     dt = 1.0 / refresh_hz
@@ -72,10 +75,7 @@ def main(serial_port: str = None, window_seconds: int = 2, refresh_hz: float = 5
             powers = compute_single_band_power(eeg, sfreq, band_range)
             avg_val = float(np.mean(powers))
 
-            prev_top = ax.get_ylim()[1]
-            new_top = max(prev_top * 0.9 + avg_val * 0.2, max(1e-3, avg_val * 1.2))
-            ax.set_ylim(0, new_top)
-
+            # Fixed scale: only update bar height
             bars[0].set_height(avg_val)
 
             fig.canvas.draw()
@@ -91,11 +91,13 @@ def main(serial_port: str = None, window_seconds: int = 2, refresh_hz: float = 5
 
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser(description="Real-time alpha band power visualization for OpenBCI Cyton")
-    parser.add_argument("--port", type=str, default=None, help="Serial port like \\ \\ .\\COM3 (Windows) or /dev/ttyUSB0 (Linux)")
+    parser.add_argument("--port", type=str, default=None, help="Serial port like \\\\.\\COM3 (Windows) or /dev/ttyUSB0 (Linux)")
     parser.add_argument("--window", type=float, default=2.0, help="Window length in seconds for PSD")
     parser.add_argument("--fps", type=float, default=5.0, help="Refresh rate (updates per second)")
+    parser.add_argument("--ymin", type=float, default=0.0, help="Fixed Y-axis min")
+    parser.add_argument("--ymax", type=float, default=100.0, help="Fixed Y-axis max")
     args = parser.parse_args()
 
-    main(serial_port=args.port, window_seconds=int(args.window), refresh_hz=args.fps)
+    main(serial_port=args.port, window_seconds=int(args.window), refresh_hz=args.fps,
+         y_min=args.ymin, y_max=args.ymax)
