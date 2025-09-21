@@ -34,7 +34,7 @@ There is no finish line — just stay alive by not going off screen. Players con
   </li>
   <li>Connect a BrainFlow-compatible EEG board</li>
   <li>Run the game:
-    <pre><code>python testwithrealvalues.py</pre></code>
+    <pre><code>python redlight_greenlight.py</pre></code>
   </li>
   <li>Note:
     <ul>
