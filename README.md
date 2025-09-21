@@ -20,5 +20,5 @@ There is no finish line — just stay alive by not going off screen. Players con
 </ul>
 <hr>
 <footer>
-  <p>By: Parse, Reese, Jack, Yaniv</p>
+  <p>By: Paras, Reese, Jack, Yaniv</p>
 </footer>
