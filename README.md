@@ -4,7 +4,7 @@
 There is no finish line — just stay alive by not going off screen. Players control their avatar using A/D (player 1) or the Left/Right arrow (player 2). EEG brain data controls the speed of the avatar. The more alpha input the faster the speed. During red lights the avatar goes backwards, while during green lights it goes forward. Cars also pass randomly as hazards — avoid them to survive. The Last player standing wins.</p>
 <h2>Demonstrations</h2>
 <figure>
-<img width="450" height="450" src="https://github.com/user-attachments/assets/b6d5e2fd-bf31-4bde-aa65-d3c6d11e2b1c"><br>
+<img width="473" height="600" src="https://github.com/user-attachments/assets/b6d5e2fd-bf31-4bde-aa65-d3c6d11e2b1c"><br>
 <figcaption>Playing Game connected with EEG</figcaption><br><hr>
 </figure>
 <figure>
