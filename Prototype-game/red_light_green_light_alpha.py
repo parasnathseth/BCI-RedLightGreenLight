@@ -389,22 +389,19 @@ def main(serial_port: str = None):
     road_tilt = -int(WIDTH * 0.08)
     road_bottom_width = int(WIDTH * 0.8)
     road_top_width = int(WIDTH * 0.2)
+    # Player positions (world coordinates). We only track lateral (x) and depth (y).
     player1_world_x = -player_size * 0.35
     player2_world_x = player_size * 0.35
-    player1_vx = 0.0
-    player2_vx = 0.0
     start_world_y = 0.0
     player1_world_y = start_world_y
     player2_world_y = start_world_y
     camera_y = 0.0
     camera_y_prev = camera_y
     camera_anchor_screen_y = int(HEIGHT * 0.62)
+    # Movement tuning: a simple lateral step per second (px/sec). We keep forward/back world_y
+    # static for now (no forward movement). move_step is a convenient baseline.
     move_step = max(8, int(HEIGHT * 0.02))
-    MOVE_SPEED = max(60, int(move_step * 5))
-    LATERAL_ACCEL_BASE = MOVE_SPEED * 1.4 * 6.0
-    LATERAL_MAX_BASE = MOVE_SPEED * 1.2 * 6.0
-    LATERAL_DRAG = 6.0
-    WALL_BOUNCE = 0.25
+    LATERAL_STEP = max(120, int(move_step * 60))  # pixels per second when moving left/right
 
     # Cars
     road_scroll = 0.0
@@ -420,8 +417,10 @@ def main(serial_port: str = None):
     car_spawn_cooldown = 0
     CAR_MIN_COOLDOWN = 3500
     CAR_MAX_COOLDOWN = 7000
-    CAR_ONCOMING_SPEED = MOVE_SPEED * 0.55
-    CAR_TRAILING_SPEED = MOVE_SPEED * 0.45
+    # Base car speeds (in world units per second). Use LATERAL_STEP as a reasonable baseline.
+    CAR_BASE_SPEED = max(40, int(LATERAL_STEP * 0.5))
+    CAR_ONCOMING_SPEED = CAR_BASE_SPEED * 0.55
+    CAR_TRAILING_SPEED = CAR_BASE_SPEED * 0.45
 
     # Traffic light FSM
     state_sequence = ["green", "yellow", "red", "yellow"]
@@ -438,52 +437,25 @@ def main(serial_port: str = None):
     win = False
     winner_label = ""
     elapsed_ms = 0
+    # EEG integration intentionally disabled for simplified controls. Refer to
+    # _remove_dc_offset and _band_power_ratio_fft at top if re-enabling later.
 
-    # Speed bars
-    current_p1_mult = 0.0
-    current_p2_mult = 0.0
+    # Points system: start at 100 each. First to reach 0 loses.
+    player1_points = 100
+    player2_points = 100
 
-    # EEG integration (alpha controls P1)
-    eeg_ready = False
+    # Placeholder for EEG setup to avoid NameError when cleaning up later
     eeg_setup = None
-    sfreq = 0
-    eeg_chs = []
-    alpha_cal_ms = 3000
-    alpha_elapsed_ms = 0
-    alpha_min = 1e9
-    alpha_max = -1e9
-    alpha_ratio = 0.0
-    last_eeg_update_ms = 0
-    eeg_refresh_ms = 200
-    eeg_accum_ms = 0
-    samples_needed = 0
 
-    if EEG_AVAILABLE:
-        try:
-            board_id = BoardIds.CYTON_BOARD.value
-            eeg_setup = BrainFlowBoardSetup(board_id=board_id, serial_port=serial_port, name="Cyton")
-            eeg_setup.setup()
-            sfreq = eeg_setup.get_sampling_rate() or 0
-            if sfreq > 0:
-                eeg_chs = getattr(eeg_setup, "eeg_channels", []) or list(range(1, 9))
-                samples_needed = max(int(2.0 * sfreq), 64)
-                eeg_ready = True
-        except Exception as e:
-            print("EEG init failed:", e)
-            eeg_setup = None
-            eeg_ready = False
-
+    # reset_game restores the primary mutable game state used by the main loop.
     def reset_game():
-        nonlocal player1_world_y, player2_world_y, camera_y, game_over, win, winner_label, elapsed_ms
+        nonlocal player1_world_y, player2_world_y, camera_y, camera_y_prev, game_over, win, winner_label, elapsed_ms
         nonlocal state_index, light_state, light_timer_ms, light_interval_ms
-        nonlocal current_p1_mult, current_p2_mult
-        nonlocal camera_y_prev, road_scroll, cloud_off_x, cloud_off_y
-        nonlocal player1_vx, player2_vx
+        nonlocal player1_points, player2_points
+        nonlocal road_scroll, scenery_scroll, cloud_off_x, cloud_off_y
         nonlocal car_active, car_spawn_cooldown
         player1_world_y = start_world_y
         player2_world_y = start_world_y
-        player1_vx = 0.0
-        player2_vx = 0.0
         camera_y = 0.0
         camera_y_prev = camera_y
         game_over = False
@@ -494,8 +466,8 @@ def main(serial_port: str = None):
         light_state = state_sequence[state_index]
         light_timer_ms = 0
         light_interval_ms = next_interval_for(light_state)
-        current_p1_mult = 0.0
-        current_p2_mult = 0.0
+        player1_points = 100
+        player2_points = 100
         road_scroll = 0.0
         scenery_scroll = 0.0
         cloud_off_x = 0.0
@@ -515,101 +487,70 @@ def main(serial_port: str = None):
                 elif event.key == pygame.K_x:
                     reset_game()
 
+
         if not game_over:
+            # Simple input: left/right movement for both players. We intentionally keep
+            # forward/back movement disabled for now. Movement is immediate (no velocity/drag).
             keys = pygame.key.get_pressed()
             dt_sec = dt / 1000.0
 
-            # Update EEG alpha (P1 speed)
-            if eeg_ready:
-                eeg_accum_ms += dt
-                if eeg_accum_ms >= eeg_refresh_ms:
-                    eeg_accum_ms = 0
-                    data = eeg_setup.get_current_board_data(num_samples=samples_needed)
-                    if (
-                        data is not None
-                        and data.size > 0
-                        and data.shape[1] >= samples_needed
-                        and (len(eeg_chs) == 0 or max(eeg_chs) < data.shape[0])
-                    ):
-                        eeg = data[eeg_chs, :]
-                        eeg = _remove_dc_offset(eeg)
-                        ratio = _band_power_ratio_fft(eeg, sfreq, band=(8, 12), total=(1, 30))
-                        alpha_ratio = ratio
-                        if alpha_elapsed_ms < alpha_cal_ms:
-                            alpha_min = min(alpha_min, ratio)
-                            alpha_max = max(alpha_max, ratio)
-                        else:
-                            # Slow adaptation of bounds
-                            alpha_min = 0.99 * alpha_min + 0.01 * min(alpha_min, ratio)
-                            alpha_max = 0.99 * alpha_max + 0.01 * max(alpha_max, ratio)
-                        last_eeg_update_ms = elapsed_ms
-            # Advance calibration timer
-            if eeg_ready:
-                alpha_elapsed_ms += dt
+            # Controls (fallback mapping):
+            # Player 1: A = left, D = right
+            # Player 2: LEFT ARROW = left, RIGHT ARROW = right
+            p1_dx = 0
+            p2_dx = 0
+            if keys[pygame.K_a]:
+                p1_dx = -1
+            elif keys[pygame.K_d]:
+                p1_dx = 1
+            if keys[pygame.K_LEFT]:
+                p2_dx = -1
+            elif keys[pygame.K_RIGHT]:
+                p2_dx = 1
 
-            # Map alpha to P1 multiplier
-            max_mult = 1.6
-            if eeg_ready and alpha_max > alpha_min and alpha_elapsed_ms >= alpha_cal_ms:
-                norm = (alpha_ratio - alpha_min) / max(1e-6, (alpha_max - alpha_min))
-                norm = max(0.0, min(1.0, norm))
-                current_p1_mult = norm * max_mult
+            # Movement rules depending on light state:
+            # - RED: players should NOT move. If they do, they lose points.
+            # - GREEN or YELLOW: players may move left/right.
+            move_amount = int(LATERAL_STEP * dt_sec)
+            if light_state == "red":
+                # Penalize movement attempts on red: deduct points per frame moved.
+                if p1_dx != 0:
+                    player1_points = max(0, player1_points - 1)
+                    if player1_points == 0:
+                        game_over = True
+                        win = True
+                        winner_label = "Player 2"
+                if p2_dx != 0:
+                    player2_points = max(0, player2_points - 1)
+                    if player2_points == 0:
+                        game_over = True
+                        win = True
+                        winner_label = "Player 1"
             else:
-                # Fallback: allow QWERTY tiers during calibration or no EEG
-                p1_keys = [pygame.K_q, pygame.K_w, pygame.K_e, pygame.K_r, pygame.K_t, pygame.K_y]
-                p1_multipliers = [0.3, 0.6, 0.85, 1.1, 1.35, 1.6]
-                p1_level = -1
-                for idx, k in enumerate(p1_keys):
-                    if keys[k]:
-                        p1_level = max(p1_level, idx)
-                current_p1_mult = p1_multipliers[p1_level] if p1_level >= 0 else 0.0
+                # Allowed to move on green/yellow
+                player1_world_x += p1_dx * move_amount
+                player2_world_x += p2_dx * move_amount
 
-            # Apply forward/back movement with traffic light
-            if current_p1_mult > 0.0:
-                if light_state in ("green", "yellow"):
-                    player1_world_y -= (MOVE_SPEED * current_p1_mult) * dt_sec
-                elif light_state == "red":
-                    player1_world_y = min(player1_world_y + (MOVE_SPEED * current_p1_mult) * dt_sec, start_world_y)
+            # Clamp lateral positions to road edges using existing compute function
+            def compute_edges_and_scale(wx: float, wy: float):
+                v = 0.0 if HEIGHT == horizon_y else max(0.0001, min(1.0, (wy - camera_y) / (HEIGHT - horizon_y)))
+                center_top = (WIDTH * 0.5 + road_tilt * (1 - v))
+                halftop = road_top_width * 0.5
+                halfbot = road_bottom_width * 0.5
+                halfw = halftop * (1 - v) + halfbot * v
+                cx = center_top
+                sc = SCALE_FAR + (SCALE_NEAR - SCALE_FAR) * (v ** SCALE_GAMMA)
+                px_half = (player_size * sc * 0.35)
+                world_half_x = px_half / v
+                left_edge = ((cx - halfw) + px_half - cx) / v
+                right_edge = ((cx + halfw) - px_half - cx) / v
+                h_world = player_size * sc * 0.65
+                return v, sc, left_edge, right_edge, world_half_x, h_world
 
-            # Player 2 - ASDFGH tiers
-            p2_keys = [pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_f, pygame.K_g, pygame.K_h]
-            p2_multipliers = [0.3, 0.6, 0.85, 1.1, 1.35, 1.6]
-            p2_level = -1
-            for idx, k in enumerate(p2_keys):
-                if keys[k]:
-                    p2_level = max(p2_level, idx)
-            current_p2_mult = p2_multipliers[p2_level] if p2_level >= 0 else 0.0
-            if current_p2_mult > 0.0:
-                if light_state in ("green", "yellow"):
-                    player2_world_y -= (MOVE_SPEED * current_p2_mult) * dt_sec
-                elif light_state == "red":
-                    player2_world_y = min(player2_world_y + (MOVE_SPEED * current_p2_mult) * dt_sec, start_world_y)
-
-            # Lateral input: P1 (C/V) and P2 (B/N); scaled with 10% baseline
-            p1_scale = max(0.1, current_p1_mult)
-            p1_accel = LATERAL_ACCEL_BASE * p1_scale
-            p1_max = LATERAL_MAX_BASE * p1_scale
-            p1_ax = 0.0
-            if keys[pygame.K_c]:
-                p1_ax -= p1_accel
-            if keys[pygame.K_v]:
-                p1_ax += p1_accel
-            player1_vx += p1_ax * dt_sec
-            player1_vx -= player1_vx * LATERAL_DRAG * dt_sec
-            player1_vx = max(-p1_max, min(p1_max, player1_vx))
-            player1_world_x += player1_vx * dt_sec
-
-            p2_scale = max(0.1, current_p2_mult)
-            p2_accel = LATERAL_ACCEL_BASE * p2_scale
-            p2_max = LATERAL_MAX_BASE * p2_scale
-            p2_ax = 0.0
-            if keys[pygame.K_b]:
-                p2_ax -= p2_accel
-            if keys[pygame.K_n]:
-                p2_ax += p2_accel
-            player2_vx += p2_ax * dt_sec
-            player2_vx -= player2_vx * LATERAL_DRAG * dt_sec
-            player2_vx = max(-p2_max, min(p2_max, player2_vx))
-            player2_world_x += player2_vx * dt_sec
+            p1_v, p1_sc, p1_wxmin, p1_wxmax, p1_hbx, p1_hh = compute_edges_and_scale(player1_world_x, player1_world_y)
+            p2_v, p2_sc, p2_wxmin, p2_wxmax, p2_hbx, p2_hh = compute_edges_and_scale(player2_world_x, player2_world_y)
+            player1_world_x = max(p1_wxmin, min(p1_wxmax, player1_world_x))
+            player2_world_x = max(p2_wxmin, min(p2_wxmax, player2_world_x))
 
             # Clamp to road and collisions (as in v2)
             def compute_edges_and_scale(wx: float, wy: float):
@@ -630,18 +571,16 @@ def main(serial_port: str = None):
             p1_v, p1_sc, p1_wxmin, p1_wxmax, p1_hbx, p1_hh = compute_edges_and_scale(player1_world_x, player1_world_y)
             p2_v, p2_sc, p2_wxmin, p2_wxmax, p2_hbx, p2_hh = compute_edges_and_scale(player2_world_x, player2_world_y)
 
+            # Clamp lateral positions to road edges. We do not track lateral velocities
+            # in this simplified control mode, so just clamp positions to edges.
             if player1_world_x < p1_wxmin:
                 player1_world_x = p1_wxmin
-                player1_vx = abs(player1_vx) * WALL_BOUNCE
             elif player1_world_x > p1_wxmax:
                 player1_world_x = p1_wxmax
-                player1_vx = -abs(player1_vx) * WALL_BOUNCE
             if player2_world_x < p2_wxmin:
                 player2_world_x = p2_wxmin
-                player2_vx = abs(player2_vx) * WALL_BOUNCE
             elif player2_world_x > p2_wxmax:
                 player2_world_x = p2_wxmax
-                player2_vx = -abs(player2_vx) * WALL_BOUNCE
 
             p1_left = player1_world_x - p1_hbx
             p1_right = player1_world_x + p1_hbx
@@ -661,9 +600,6 @@ def main(serial_port: str = None):
                 else:
                     player1_world_x += push
                     player2_world_x -= push
-                v1, v2 = player1_vx, player2_vx
-                player1_vx = v2 * 0.5
-                player2_vx = v1 * 0.5
 
             p1_v, p1_sc, p1_wxmin, p1_wxmax, p1_hbx, p1_hh = compute_edges_and_scale(player1_world_x, player1_world_y)
             p2_v, p2_sc, p2_wxmin, p2_wxmax, p2_hbx, p2_hh = compute_edges_and_scale(player2_world_x, player2_world_y)
@@ -741,10 +677,12 @@ def main(serial_port: str = None):
                 def overlap(ax1, ax2, ay1, ay2, bx1, bx2, by1, by2):
                     return (min(ax2, bx2) - max(ax1, bx1) > 0) and (min(ay2, by2) - max(ay1, by1) > 0)
                 if overlap(car_left, car_right, car_top, car_bottom, p1_l, p1_r, p1_t, p1_b):
+                    # Player 1 hit a car -> immediate loss, Player 2 wins
                     game_over = True
                     win = True
                     winner_label = "Player 2"
                 elif overlap(car_left, car_right, car_top, car_bottom, p2_l, p2_r, p2_t, p2_b):
+                    # Player 2 hit a car -> immediate loss, Player 1 wins
                     game_over = True
                     win = True
                     winner_label = "Player 1"
@@ -789,7 +727,6 @@ def main(serial_port: str = None):
             halfbot = road_bottom_width * 0.5
             halfw = halftop * (1 - v) + halfbot * v
             lane_halfw = halfw * 0.5
-            img = None
             if car_type == 'oncoming' and CAR_IMG_FRONT is not None:
                 img = CAR_IMG_FRONT
             elif car_type == 'trailing' and CAR_IMG_BACK is not None:
@@ -814,28 +751,29 @@ def main(serial_port: str = None):
         p2_sx += int(WIDTH * 0.02 * p2_v)
         screen.blit(font_small.render("P1", True, P1_ACCENT), (p1_sx - 10, p1_sy - int(player_size * p1_scale)))
         screen.blit(font_small.render("P2", True, P2_ACCENT), (p2_sx - 10, p2_sy - int(player_size * p2_scale)))
-        p1_moving = (current_p1_mult > 0 and light_state in ("green", "yellow"))
-        p2_moving = (current_p2_mult > 0 and light_state in ("green", "yellow"))
+        # Animation 'moving' flag is simplified: if the light allows movement we show a small bob.
+        p1_moving = (light_state in ("green", "yellow"))
+        p2_moving = (light_state in ("green", "yellow"))
         players = [
-            (p1_v, p1_sx, p1_sy, p1_scale, P1_ACCENT, (elapsed_ms / 1000.0) * (2.0 + 2.0 * current_p1_mult), p1_moving),
-            (p2_v, p2_sx, p2_sy, p2_scale, P2_ACCENT, (elapsed_ms / 1000.0) * (2.0 + 2.0 * current_p2_mult), p2_moving),
+            (p1_v, p1_sx, p1_sy, p1_scale, P1_ACCENT, (elapsed_ms / 1000.0) * 2.0, p1_moving),
+            (p2_v, p2_sx, p2_sy, p2_scale, P2_ACCENT, (elapsed_ms / 1000.0) * 2.0, p2_moving),
         ]
         players.sort(key=lambda t: t[0])
         for v, sx, sy, sc, accent, phase, moving in players:
             draw_player(screen, sx - int(player_size * sc * 0.5), sy - int(player_size * sc * 0.8), int(player_size * sc), accent_color=accent, anim_phase=phase, moving=moving)
 
         if light_state == "green":
-            state_text = "GREEN - P1: Alpha (EEG)  |  P2: ASDFGH"
+            state_text = "GREEN - Move left/right"
             state_color = GREEN
         elif light_state == "red":
-            state_text = "RED - Do NOT move"
+            state_text = "RED - DO NOT MOVE (penalty)"
             state_color = RED
         else:
-            state_text = "YELLOW - You may move"
+            state_text = "YELLOW - Move left/right"
             state_color = YELLOW
         screen.blit(font_small.render(state_text, True, state_color), (10, HEIGHT - 34))
-        controls_text = "X: Restart   ESC: Quit   P1 C/V, P2 B/N"
-        screen.blit(font_small.render(controls_text, True, BLACK), (WIDTH - 380, HEIGHT - 34))
+        controls_text = "X: Restart   ESC: Quit   P1: A/D   P2: ←/→"
+        screen.blit(font_small.render(controls_text, True, BLACK), (WIDTH - 420, HEIGHT - 34))
 
         mins = int(elapsed_ms // 60000)
         secs = int((elapsed_ms // 1000) % 60)
@@ -843,25 +781,12 @@ def main(serial_port: str = None):
         time_text = f"Time: {mins:02}:{secs:02}.{tenths}"
         screen.blit(font_small.render(time_text, True, BLACK), (10, 10))
 
-        # Speed bars
-        bar_w = int(WIDTH * 0.25)
-        bar_h = 10
-        bar_x = 10
-        p1_bar_y = 40
-        p2_bar_y = 60
-        max_mult = 1.6
-        pygame.draw.rect(screen, (220, 220, 220), (bar_x, p1_bar_y, bar_w, bar_h), border_radius=4)
-        pygame.draw.rect(screen, (220, 220, 220), (bar_x, p2_bar_y, bar_w, bar_h), border_radius=4)
-        p1_fill = int(bar_w * min(1.0, (current_p1_mult if 'current_p1_mult' in locals() else 0.0) / max_mult))
-        p2_fill = int(bar_w * min(1.0, (current_p2_mult if 'current_p2_mult' in locals() else 0.0) / max_mult))
-        pygame.draw.rect(screen, P1_ACCENT, (bar_x, p1_bar_y, p1_fill, bar_h), border_radius=4)
-        pygame.draw.rect(screen, P2_ACCENT, (bar_x, p2_bar_y, p2_fill, bar_h), border_radius=4)
-        screen.blit(font_small.render(f"P1 Speed", True, P1_ACCENT), (bar_x + bar_w + 10, p1_bar_y - 6))
-        screen.blit(font_small.render(f"P2 Speed", True, P2_ACCENT), (bar_x + bar_w + 10, p2_bar_y - 6))
+        # Points display
+        pts_x = 10
+        screen.blit(font_small.render(f"P1 Points: {player1_points}", True, P1_ACCENT), (pts_x, 40))
+        screen.blit(font_small.render(f"P2 Points: {player2_points}", True, P2_ACCENT), (pts_x, 64))
 
-        # Calibration hint
-        if eeg_ready and alpha_elapsed_ms < alpha_cal_ms:
-            show_center_text(screen, "Calibrating alpha...", BLUE, font_big)
+        # Calibration hint: EEG disabled in this simplified mode.
 
         if game_over:
             if win:
