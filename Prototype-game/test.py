@@ -446,10 +446,14 @@ def main(serial_port: str = None):
     current_p1_mult = 0.0
     current_p2_mult = 0.0
 
-    # Test alpha ratio - random value between 0.1 and 3.0
-    alpha_ratio = 0.0
-    alpha_ratio_timer = 0
-    alpha_ratio_interval = 2000  # Change every 2 seconds for testing
+    # Test alpha ratios - random values between 0.1 and 3.0 for both players
+    alpha_ratio_p1 = 0.0
+    alpha_ratio_p1_timer = 0
+    alpha_ratio_p1_interval = 2000  # Change every 2 seconds for testing
+
+    alpha_ratio_p2 = 0.0
+    alpha_ratio_p2_timer = 0
+    alpha_ratio_p2_interval = 1500  # Different interval for P2 to make them independent
 
     # Commented out EEG integration (alpha controls P1)
     # eeg_ready = False
@@ -495,7 +499,7 @@ def main(serial_port: str = None):
         nonlocal camera_y_prev, road_scroll, cloud_off_x, cloud_off_y
         nonlocal player1_vx, player2_vx
         nonlocal car_active, car_spawn_cooldown
-        nonlocal alpha_ratio, alpha_ratio_timer
+        nonlocal alpha_ratio_p1, alpha_ratio_p1_timer, alpha_ratio_p2, alpha_ratio_p2_timer
         player1_world_y = start_world_y
         player2_world_y = start_world_y
         player1_vx = 0.0
@@ -519,11 +523,14 @@ def main(serial_port: str = None):
         _CAR_IMG_SCALE_CACHE.clear()
         car_active = False
         car_spawn_cooldown = 0
-        alpha_ratio = random.uniform(0.1, 3.0)  # Initialize with random value
-        alpha_ratio_timer = 0
+        alpha_ratio_p1 = random.uniform(0.1, 3.0)  # Initialize with random value
+        alpha_ratio_p1_timer = 0
+        alpha_ratio_p2 = random.uniform(0.1, 3.0)  # Initialize with random value
+        alpha_ratio_p2_timer = 0
 
-    # Initialize alpha ratio for first time
-    alpha_ratio = random.uniform(0.1, 3.0)
+    # Initialize alpha ratios for first time
+    alpha_ratio_p1 = random.uniform(0.1, 3.0)
+    alpha_ratio_p2 = random.uniform(0.1, 3.0)
 
     while running:
         dt = clock.tick(FPS)
@@ -540,45 +547,44 @@ def main(serial_port: str = None):
             keys = pygame.key.get_pressed()
             dt_sec = dt / 1000.0
 
-            # Update test alpha ratio periodically
-            alpha_ratio_timer += dt
-            if alpha_ratio_timer >= alpha_ratio_interval:
-                alpha_ratio = random.uniform(0.1, 3.0)
-                alpha_ratio_timer = 0
+            # Update test alpha ratios periodically (independent timers)
+            alpha_ratio_p1_timer += dt
+            if alpha_ratio_p1_timer >= alpha_ratio_p1_interval:
+                alpha_ratio_p1 = random.uniform(0.1, 3.0)
+                alpha_ratio_p1_timer = 0
 
-            # Direct translation of alpha ratio to P1 multiplier (clamped to reasonable range)
+            alpha_ratio_p2_timer += dt
+            if alpha_ratio_p2_timer >= alpha_ratio_p2_interval:
+                alpha_ratio_p2 = random.uniform(0.1, 3.0)
+                alpha_ratio_p2_timer = 0
+
+            # Direct translation of alpha ratios to player multipliers (clamped to reasonable range)
             max_mult = 1.6
-            current_p1_mult = max(0.0, min(max_mult, alpha_ratio * 0.5))  # Scale by 0.5 to keep in reasonable range
+            current_p1_mult = max(0.0, min(max_mult, alpha_ratio_p1 * 0.5))  # Scale by 0.5 to keep in reasonable range
+            current_p2_mult = max(0.0, min(max_mult, alpha_ratio_p2 * 0.5))  # Scale by 0.5 to keep in reasonable range
 
-            # Apply forward/back movement with traffic light
+            # Apply forward/back movement with traffic light for P1
             if current_p1_mult > 0.0:
                 if light_state in ("green", "yellow"):
                     player1_world_y -= (MOVE_SPEED * current_p1_mult) * dt_sec
                 elif light_state == "red":
                     player1_world_y = min(player1_world_y + (MOVE_SPEED * current_p1_mult) * dt_sec, start_world_y)
 
-            # Player 2 - ASDFGH tiers
-            p2_keys = [pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_f, pygame.K_g, pygame.K_h]
-            p2_multipliers = [0.3, 0.6, 0.85, 1.1, 1.35, 1.6]
-            p2_level = -1
-            for idx, k in enumerate(p2_keys):
-                if keys[k]:
-                    p2_level = max(p2_level, idx)
-            current_p2_mult = p2_multipliers[p2_level] if p2_level >= 0 else 0.0
+            # Apply forward/back movement with traffic light for P2 (now using alpha ratio instead of keyboard)
             if current_p2_mult > 0.0:
                 if light_state in ("green", "yellow"):
                     player2_world_y -= (MOVE_SPEED * current_p2_mult) * dt_sec
                 elif light_state == "red":
                     player2_world_y = min(player2_world_y + (MOVE_SPEED * current_p2_mult) * dt_sec, start_world_y)
 
-            # Lateral input: P1 (C/V) and P2 (B/N); scaled with 10% baseline
+            # Lateral input: P1 (A/D) and P2 (Left/Right arrows); scaled with 10% baseline
             p1_scale = max(0.1, current_p1_mult)
             p1_accel = LATERAL_ACCEL_BASE * p1_scale
             p1_max = LATERAL_MAX_BASE * p1_scale
             p1_ax = 0.0
-            if keys[pygame.K_c]:
+            if keys[pygame.K_a]:
                 p1_ax -= p1_accel
-            if keys[pygame.K_v]:
+            if keys[pygame.K_d]:
                 p1_ax += p1_accel
             player1_vx += p1_ax * dt_sec
             player1_vx -= player1_vx * LATERAL_DRAG * dt_sec
@@ -589,9 +595,9 @@ def main(serial_port: str = None):
             p2_accel = LATERAL_ACCEL_BASE * p2_scale
             p2_max = LATERAL_MAX_BASE * p2_scale
             p2_ax = 0.0
-            if keys[pygame.K_b]:
+            if keys[pygame.K_LEFT]:
                 p2_ax -= p2_accel
-            if keys[pygame.K_n]:
+            if keys[pygame.K_RIGHT]:
                 p2_ax += p2_accel
             player2_vx += p2_ax * dt_sec
             player2_vx -= player2_vx * LATERAL_DRAG * dt_sec
@@ -812,7 +818,7 @@ def main(serial_port: str = None):
             draw_player(screen, sx - int(player_size * sc * 0.5), sy - int(player_size * sc * 0.8), int(player_size * sc), accent_color=accent, anim_phase=phase, moving=moving)
 
         if light_state == "green":
-            state_text = "GREEN - P1: Alpha (TEST)  |  P2: ASDFGH"
+            state_text = "GREEN - P1: Alpha (TEST)  |  P2: Alpha (TEST)"
             state_color = GREEN
         elif light_state == "red":
             state_text = "RED - Do NOT move"
@@ -821,7 +827,7 @@ def main(serial_port: str = None):
             state_text = "YELLOW - You may move"
             state_color = YELLOW
         screen.blit(font_small.render(state_text, True, state_color), (10, HEIGHT - 34))
-        controls_text = "X: Restart   ESC: Quit   P1 C/V, P2 B/N"
+        controls_text = "X: Restart   ESC: Quit   P1 A/D, P2 Left/Right"
         screen.blit(font_small.render(controls_text, True, BLACK), (WIDTH - 380, HEIGHT - 34))
 
         mins = int(elapsed_ms // 60000)
@@ -843,11 +849,11 @@ def main(serial_port: str = None):
         p2_fill = int(bar_w * min(1.0, current_p2_mult / max_mult))
         pygame.draw.rect(screen, P1_ACCENT, (bar_x, p1_bar_y, p1_fill, bar_h), border_radius=4)
         pygame.draw.rect(screen, P2_ACCENT, (bar_x, p2_bar_y, p2_fill, bar_h), border_radius=4)
-        screen.blit(font_small.render(f"P1 Speed (Alpha: {alpha_ratio:.2f})", True, P1_ACCENT), (bar_x + bar_w + 10, p1_bar_y - 6))
-        screen.blit(font_small.render(f"P2 Speed", True, P2_ACCENT), (bar_x + bar_w + 10, p2_bar_y - 6))
+        screen.blit(font_small.render(f"P1 Speed (Alpha: {alpha_ratio_p1:.2f})", True, P1_ACCENT), (bar_x + bar_w + 10, p1_bar_y - 6))
+        screen.blit(font_small.render(f"P2 Speed (Alpha: {alpha_ratio_p2:.2f})", True, P2_ACCENT), (bar_x + bar_w + 10, p2_bar_y - 6))
 
         # Test mode indicator
-        screen.blit(font_small.render("TEST MODE - Random Alpha Values", True, (255, 100, 100)), (10, 80))
+        screen.blit(font_small.render("TEST MODE - Random Alpha Values for Both Players", True, (255, 100, 100)), (10, 80))
 
         if game_over:
             if win:
