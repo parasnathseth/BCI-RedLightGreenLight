@@ -5,6 +5,7 @@ import math
 import os
 import time
 import numpy as np
+import brainflow_stream
 
 # Optional BrainFlow import (graceful fallback if unavailable)
 EEG_AVAILABLE = False
@@ -16,6 +17,7 @@ try:
     if _parent_dir not in sys.path:
         sys.path.insert(0, _parent_dir)
     from brainflow_stream import BrainFlowBoardSetup  # uses your repo helper
+    import brainflow
     from brainflow.board_shim import BoardIds  # correct enum import
     EEG_AVAILABLE = True
 except Exception:
@@ -23,10 +25,8 @@ except Exception:
     BoardIds = None
     EEG_AVAILABLE = False
 
-
 WIDTH, HEIGHT = 640, 480
 FPS = 60
-
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -57,34 +57,26 @@ CAR_IMG_FRONT = None
 CAR_IMG_BACK = None
 _CAR_IMG_SCALE_CACHE = {}
 
-
-# ---------------- EEG utilities (no SciPy dependency) ---------------- #
+# ---------------- EEG utilities (restored for real data) ---------------- #
 
 def _remove_dc_offset(eeg_data: np.ndarray) -> np.ndarray:
     return eeg_data - np.mean(eeg_data, axis=1, keepdims=True)
 
-from scipy.signal import welch
+try:
+    from scipy.signal import welch
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    welch = None
+
 def _band_power_ratio_fft(eeg_data, sfreq, bands=None, nperseg=1024):
     """
     Compute a single scalar: the alpha:beta power ratio averaged across all channels
     using Welch's method.
-
-    Parameters
-    ----------
-    eeg_data : ndarray
-        EEG signal, shape (n_channels, n_samples) or (n_samples,) for single channel.
-    sfreq : float
-        Sampling frequency in Hz.
-    bands : dict, optional
-        Frequency bands as {"band": (low, high)} in Hz. Must include "alpha" and "beta".
-    nperseg : int, optional
-        Length of each segment for Welch PSD.
-
-    Returns
-    -------
-    float
-        Average alpha:beta power ratio across channels.
     """
+    if not SCIPY_AVAILABLE:
+        return 1.0, 1.0, 1.0  # fallback if scipy not available (ratio, alpha_avg, beta_avg)
+        
     if bands is None:
         bands = {
             "delta": (1, 4),
@@ -103,7 +95,7 @@ def _band_power_ratio_fft(eeg_data, sfreq, bands=None, nperseg=1024):
 
     nperseg = int(min(nperseg, eeg.shape[1])) if eeg.shape[1] > 0 else 0
     if nperseg <= 1 or sfreq <= 0:
-        return 0.0
+        return 1.0, 1.0, 1.0
 
     freqs, psd = welch(eeg, fs=sfreq, nperseg=nperseg, axis=1)  # psd: (n_channels, n_freqs)
 
@@ -116,11 +108,15 @@ def _band_power_ratio_fft(eeg_data, sfreq, bands=None, nperseg=1024):
     alpha_power = band_power(*alpha_band)
     beta_power = band_power(*beta_band)
 
+    # Calculate averages across channels
+    alpha_avg = float(np.mean(alpha_power))
+    beta_avg = float(np.mean(beta_power))
+
     epsilon = 1e-12
     ratios = alpha_power / (beta_power + epsilon)  # per-channel ratio
-    return float(np.mean(ratios))
-
-
+    ratio_avg = float(np.mean(ratios))
+    
+    return ratio_avg, alpha_avg, beta_avg
 
 # ---------------- Drawing helpers (copied from v2) ---------------- #
 
@@ -150,7 +146,6 @@ def draw_traffic_light(surface, x, y, state):
         gy = positions[active] - 70
         surface.blit(glow, (cx - 70, gy), special_flags=pygame.BLEND_ADD)
 
-
 def draw_background(surface):
     top = (180, 210, 255)
     mid = (120, 170, 240)
@@ -158,7 +153,6 @@ def draw_background(surface):
     h2 = int(HEIGHT * 0.5)
     pygame.draw.rect(surface, top, (0, 0, WIDTH, h1))
     pygame.draw.rect(surface, mid, (0, h1, WIDTH, h2 - h1))
-
 
 def draw_cloud(surface, x, y, scale=1.0):
     color = (245, 250, 255)
@@ -173,7 +167,6 @@ def draw_cloud(surface, x, y, scale=1.0):
     for cx, cy in c:
         pygame.draw.circle(surface, color, (int(cx), int(cy)), r)
 
-
 def draw_horizon_fog(surface, horizon_y):
     fog_h = int(HEIGHT * 0.35)
     fog = pygame.Surface((WIDTH, fog_h), pygame.SRCALPHA)
@@ -182,7 +175,6 @@ def draw_horizon_fog(surface, horizon_y):
         alpha = int(90 * (1 - t))
         pygame.draw.rect(fog, (255, 255, 255, alpha), (0, i, WIDTH, 1))
     surface.blit(fog, (0, horizon_y))
-
 
 def draw_road(surface, horizon_y, center_tilt_x, scroll):
     bottom_width = int(WIDTH * 0.8)
@@ -208,7 +200,6 @@ def draw_road(surface, horizon_y, center_tilt_x, scroll):
         cx = int(center_top * (1 - v) + center_bottom * v)
         w = max(2, int(6 * scale))
         pygame.draw.line(surface, line_color, (cx, y0), (cx, y1), width=w)
-
 
 def draw_car(surface, sx, sy, v, lane_halfw, color_body=(180, 30, 30), img=None):
     lane_w = max(8, int(lane_halfw * 1.8))
@@ -237,7 +228,6 @@ def draw_car(surface, sx, sy, v, lane_halfw, color_body=(180, 30, 30), img=None)
     w = rect.inflate(-int(car_w * 0.4), -int(car_h * 0.6))
     if w.height > 0 and w.width > 0:
         pygame.draw.rect(surface, (230, 230, 230), w, border_radius=max(2, int(4 * v)))
-
 
 def draw_side_scenery(surface, horizon_y, road_tilt, scroll):
     bottom_width = int(WIDTH * 0.8)
@@ -305,7 +295,6 @@ def draw_side_scenery(surface, horizon_y, road_tilt, scroll):
                 gx = int(right_min + f * (right_max - right_min)) + jR
                 draw_tree(gx, y, sc)
 
-
 def draw_player(surface, x, y, size, accent_color=None, anim_phase: float = 0.0, moving: bool = False):
     bob = int(size * 0.04 * math.sin(anim_phase * math.tau)) if moving else 0
     if CHICKEN_IMG is not None and size > 0:
@@ -364,12 +353,10 @@ def draw_player(surface, x, y, size, accent_color=None, anim_phase: float = 0.0,
         )
         pygame.draw.rect(surface, accent_color, band_rect, border_radius=6)
 
-
 def show_center_text(screen, text, color, font):
     msg = font.render(text, True, color)
     rect = msg.get_rect(center=(WIDTH // 2, HEIGHT // 2))
     screen.blit(msg, rect)
-
 
 def main(serial_port: str = None):
     pygame.init()
@@ -377,7 +364,7 @@ def main(serial_port: str = None):
     info = pygame.display.Info()
     global WIDTH, HEIGHT
     WIDTH, HEIGHT = info.current_w, info.current_h
-    pygame.display.set_caption("Red Light Green Light - Alpha Control (Fullscreen)")
+    pygame.display.set_caption("Red Light Green Light - Real Alpha + Test P2 (Fullscreen)")
     clock = pygame.time.Clock()
 
     font_big = pygame.font.SysFont(None, 56)
@@ -458,7 +445,12 @@ def main(serial_port: str = None):
     light_timer_ms = 0
     YELLOW_MS = 800
     def next_interval_for(state: str) -> int:
-        return YELLOW_MS if state == "yellow" else random.randint(1500, 3000)
+        if state == "yellow":
+            return YELLOW_MS
+        elif state == "green":
+            return random.randint(4000, 8000)  # Extended green: 4-8 seconds
+        else:  # red
+            return random.randint(1500, 3000)  # Keep red duration the same
     light_interval_ms = next_interval_for(light_state)
 
     running = True
@@ -471,24 +463,28 @@ def main(serial_port: str = None):
     current_p1_mult = 0.0
     current_p2_mult = 0.0
 
-    # EEG integration (alpha controls P1)
-    eeg_ready = False
-    eeg_setup = None
-    sfreq = 0
-    eeg_chs = []
-    alpha_cal_ms = 3000
-    alpha_elapsed_ms = 0
-    alpha_min = 1e9
-    alpha_max = -1e9
-    alpha_ratio = 0.0
+    # P1: Real EEG alpha/beta ratio
+    alpha_ratio_p1 = 1.0  # fallback value
     last_eeg_update_ms = 0
     eeg_refresh_ms = 200
     eeg_accum_ms = 0
     samples_needed = 0
 
+    # P2: Test random values between 0.1 and 3.0
+    alpha_ratio_p2 = 0.0
+    alpha_ratio_p2_timer = 0
+    alpha_ratio_p2_interval = 1500  # Different interval for P2 to make them independent
+
+    # EEG integration (alpha controls P1)
+    eeg_ready = False
+    eeg_setup = None
+    sfreq = 0
+    eeg_chs = []
+
+    # BrainFlow setup for P1
     if EEG_AVAILABLE:
         try:
-            board_id = BoardIds.CYTON_BOARD.value
+            board_id = brainflow.BoardIds.CYTON_BOARD.value
             eeg_setup = BrainFlowBoardSetup(board_id=board_id, serial_port=serial_port, name="Cyton")
             eeg_setup.setup()
             sfreq = eeg_setup.get_sampling_rate() or 0
@@ -496,10 +492,14 @@ def main(serial_port: str = None):
                 eeg_chs = getattr(eeg_setup, "eeg_channels", []) or list(range(1, 9))
                 samples_needed = max(int(2.0 * sfreq), 64)
                 eeg_ready = True
+                print(f"EEG ready: {sfreq} Hz, channels: {eeg_chs}")
+                print("Alpha/Beta ratio monitoring started...")
         except Exception as e:
             print("EEG init failed:", e)
             eeg_setup = None
             eeg_ready = False
+    else:
+        print("BrainFlow not available - using fallback mode")
 
     def reset_game():
         nonlocal player1_world_y, player2_world_y, camera_y, game_over, win, winner_label, elapsed_ms
@@ -508,6 +508,7 @@ def main(serial_port: str = None):
         nonlocal camera_y_prev, road_scroll, cloud_off_x, cloud_off_y
         nonlocal player1_vx, player2_vx
         nonlocal car_active, car_spawn_cooldown
+        nonlocal alpha_ratio_p1, alpha_ratio_p2, alpha_ratio_p2_timer
         player1_world_y = start_world_y
         player2_world_y = start_world_y
         player1_vx = 0.0
@@ -531,6 +532,13 @@ def main(serial_port: str = None):
         _CAR_IMG_SCALE_CACHE.clear()
         car_active = False
         car_spawn_cooldown = 0
+        alpha_ratio_p1 = 1.0  # fallback
+        alpha_ratio_p2 = random.uniform(0.1, 3.0)  # Initialize with random value
+        alpha_ratio_p2_timer = 0
+
+    # Initialize alpha ratios for first time
+    alpha_ratio_p1 = 1.0  # fallback
+    alpha_ratio_p2 = random.uniform(0.1, 3.0)
 
     while running:
         dt = clock.tick(FPS)
@@ -547,80 +555,65 @@ def main(serial_port: str = None):
             keys = pygame.key.get_pressed()
             dt_sec = dt / 1000.0
 
-            # Update EEG alpha (P1 speed)
+            # Update P1 EEG alpha/beta ratio
             if eeg_ready:
                 eeg_accum_ms += dt
                 if eeg_accum_ms >= eeg_refresh_ms:
                     eeg_accum_ms = 0
                     data = eeg_setup.get_current_board_data(num_samples=samples_needed)
-                    if (
-                        data is not None
-                        and data.size > 0
-                        and data.shape[1] >= samples_needed
-                        and (len(eeg_chs) == 0 or max(eeg_chs) < data.shape[0])
-                    ):
+                    if data is not None and data.size > 0:
                         eeg = data[eeg_chs, :]
                         eeg = _remove_dc_offset(eeg)
-                        ratio = _band_power_ratio_fft(eeg, sfreq)
-                        alpha_ratio = ratio
-                        print(f"Alpha ratio: {ratio:.5f}")
-                        if alpha_elapsed_ms < alpha_cal_ms:
-                            alpha_min = min(alpha_min, ratio)
-                            alpha_max = max(alpha_max, ratio)
+                        ratio, alpha_power, beta_power = _band_power_ratio_fft(eeg, sfreq)  # alpha:beta ratio + individual powers
+                        
+                        # Fallback for zero/very low alpha ratio - simulate reasonable values
+                        if ratio <= 0.05 or alpha_power <= 0.01:  # Very low or zero ratio/alpha power
+                            alpha_ratio_p1 = random.uniform(0.5, 2.0)  # Simulate reasonable alpha/beta ratio
+                            print(f"P1 EEG | FALLBACK MODE - Original ratio too low ({ratio:.3f}), using simulated: {alpha_ratio_p1:.3f}")
                         else:
-                            # Slow adaptation of bounds
-                            alpha_min = 0.99 * alpha_min + 0.01 * min(alpha_min, ratio)
-                            alpha_max = 0.99 * alpha_max + 0.01 * max(alpha_max, ratio)
+                            alpha_ratio_p1 = ratio
+                            
                         last_eeg_update_ms = elapsed_ms
-            # Advance calibration timer
-            if eeg_ready:
-                alpha_elapsed_ms += dt
+                        
+                        # Print alpha/beta ratio and individual band powers for debugging
+                        print(f"P1 EEG | Alpha Power: {alpha_power:.3f} | Beta Power: {beta_power:.3f} | Ratio (α/β): {alpha_ratio_p1:.3f} | Speed Mult: {max(0.0, min(1.6, alpha_ratio_p1 * 0.5)):.3f}")
 
-            # Map alpha to P1 multiplier
+            # Update P2 test alpha ratio periodically
+            alpha_ratio_p2_timer += dt
+            if alpha_ratio_p2_timer >= alpha_ratio_p2_interval:
+                alpha_ratio_p2 = random.uniform(0.1, 3.0)
+                alpha_ratio_p2_timer = 0
+                
+                # Print P2 test ratio for comparison
+                print(f"P2 Test Alpha Ratio: {alpha_ratio_p2:.3f} | Speed Mult: {max(0.0, min(1.6, alpha_ratio_p2 * 0.5)):.3f}")
+
+            # Direct translation of alpha ratios to player multipliers (clamped to reasonable range)
             max_mult = 1.6
-            if eeg_ready and alpha_max > alpha_min and alpha_elapsed_ms >= alpha_cal_ms:
-                norm = (alpha_ratio - alpha_min) / max(1e-6, (alpha_max - alpha_min))
-                norm = max(0.0, min(1.0, norm))
-                current_p1_mult = norm * max_mult
-            else:
-                # Fallback: allow QWERTY tiers during calibration or no EEG
-                p1_keys = [pygame.K_q, pygame.K_w, pygame.K_e, pygame.K_r, pygame.K_t, pygame.K_y]
-                p1_multipliers = [0.3, 0.6, 0.85, 1.1, 1.35, 1.6]
-                p1_level = -1
-                for idx, k in enumerate(p1_keys):
-                    if keys[k]:
-                        p1_level = max(p1_level, idx)
-                current_p1_mult = p1_multipliers[p1_level] if p1_level >= 0 else 0.0
+            current_p1_mult = max(0.0, min(max_mult, alpha_ratio_p1 * 0.5))  # Scale by 0.5 to keep in reasonable range
+            current_p2_mult = max(0.0, min(max_mult, alpha_ratio_p2 * 0.5))  # Scale by 0.5 to keep in reasonable range
 
-            # Apply forward/back movement with traffic light
+            # Apply forward/back movement with traffic light for P1
             if current_p1_mult > 0.0:
                 if light_state in ("green", "yellow"):
                     player1_world_y -= (MOVE_SPEED * current_p1_mult) * dt_sec
                 elif light_state == "red":
                     player1_world_y = min(player1_world_y + (MOVE_SPEED * current_p1_mult) * dt_sec, start_world_y)
 
-            # Player 2 - ASDFGH tiers
-            p2_keys = [pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_f, pygame.K_g, pygame.K_h]
-            p2_multipliers = [0.3, 0.6, 0.85, 1.1, 1.35, 1.6]
-            p2_level = -1
-            for idx, k in enumerate(p2_keys):
-                if keys[k]:
-                    p2_level = max(p2_level, idx)
-            current_p2_mult = p2_multipliers[p2_level] if p2_level >= 0 else 0.0
+            # Apply forward/back movement with traffic light for P2 (using test alpha ratio)
             if current_p2_mult > 0.0:
                 if light_state in ("green", "yellow"):
                     player2_world_y -= (MOVE_SPEED * current_p2_mult) * dt_sec
                 elif light_state == "red":
                     player2_world_y = min(player2_world_y + (MOVE_SPEED * current_p2_mult) * dt_sec, start_world_y)
 
-            # Lateral input: P1 (C/V) and P2 (B/N); scaled with 10% baseline
+            # Lateral input: P1 (A/D) and P2 (Left/Right arrows); scaled with 10% baseline
             p1_scale = max(0.1, current_p1_mult)
             p1_accel = LATERAL_ACCEL_BASE * p1_scale
             p1_max = LATERAL_MAX_BASE * p1_scale
             p1_ax = 0.0
-            if keys[pygame.K_c]:
+            if keys[pygame.K_a]:
                 p1_ax -= p1_accel
-            if keys[pygame.K_v]:
+            if keys[pygame.K_d]:
                 p1_ax += p1_accel
             player1_vx += p1_ax * dt_sec
             player1_vx -= player1_vx * LATERAL_DRAG * dt_sec
@@ -631,9 +624,9 @@ def main(serial_port: str = None):
             p2_accel = LATERAL_ACCEL_BASE * p2_scale
             p2_max = LATERAL_MAX_BASE * p2_scale
             p2_ax = 0.0
-            if keys[pygame.K_b]:
+            if keys[pygame.K_LEFT]:
                 p2_ax -= p2_accel
-            if keys[pygame.K_n]:
+            if keys[pygame.K_RIGHT]:
                 p2_ax += p2_accel
             player2_vx += p2_ax * dt_sec
             player2_vx -= player2_vx * LATERAL_DRAG * dt_sec
@@ -854,7 +847,7 @@ def main(serial_port: str = None):
             draw_player(screen, sx - int(player_size * sc * 0.5), sy - int(player_size * sc * 0.8), int(player_size * sc), accent_color=accent, anim_phase=phase, moving=moving)
 
         if light_state == "green":
-            state_text = "GREEN - P1: Alpha (EEG)  |  P2: ASDFGH"
+            state_text = "GREEN - P1: Alpha/Beta EEG  |  P2: Alpha (TEST)"
             state_color = GREEN
         elif light_state == "red":
             state_text = "RED - Do NOT move"
@@ -863,7 +856,7 @@ def main(serial_port: str = None):
             state_text = "YELLOW - You may move"
             state_color = YELLOW
         screen.blit(font_small.render(state_text, True, state_color), (10, HEIGHT - 34))
-        controls_text = "X: Restart   ESC: Quit   P1 C/V, P2 B/N"
+        controls_text = "X: Restart   ESC: Quit   P1 A/D, P2 Left/Right"
         screen.blit(font_small.render(controls_text, True, BLACK), (WIDTH - 380, HEIGHT - 34))
 
         mins = int(elapsed_ms // 60000)
@@ -881,16 +874,21 @@ def main(serial_port: str = None):
         max_mult = 1.6
         pygame.draw.rect(screen, (220, 220, 220), (bar_x, p1_bar_y, bar_w, bar_h), border_radius=4)
         pygame.draw.rect(screen, (220, 220, 220), (bar_x, p2_bar_y, bar_w, bar_h), border_radius=4)
-        p1_fill = int(bar_w * min(1.0, (current_p1_mult if 'current_p1_mult' in locals() else 0.0) / max_mult))
-        p2_fill = int(bar_w * min(1.0, (current_p2_mult if 'current_p2_mult' in locals() else 0.0) / max_mult))
+        p1_fill = int(bar_w * min(1.0, current_p1_mult / max_mult))
+        p2_fill = int(bar_w * min(1.0, current_p2_mult / max_mult))
         pygame.draw.rect(screen, P1_ACCENT, (bar_x, p1_bar_y, p1_fill, bar_h), border_radius=4)
         pygame.draw.rect(screen, P2_ACCENT, (bar_x, p2_bar_y, p2_fill, bar_h), border_radius=4)
-        screen.blit(font_small.render(f"P1 Speed", True, P1_ACCENT), (bar_x + bar_w + 10, p1_bar_y - 6))
-        screen.blit(font_small.render(f"P2 Speed", True, P2_ACCENT), (bar_x + bar_w + 10, p2_bar_y - 6))
+        
+        # Show EEG status and values
+        eeg_status = "EEG: Connected" if eeg_ready else "EEG: Fallback"
+        eeg_color = P1_ACCENT if eeg_ready else (255, 100, 100)
+        screen.blit(font_small.render(f"P1 Speed (α/β: {alpha_ratio_p1:.2f}) - {eeg_status}", True, eeg_color), (bar_x + bar_w + 10, p1_bar_y - 6))
+        screen.blit(font_small.render(f"P2 Speed (α: {alpha_ratio_p2:.2f}) - TEST", True, P2_ACCENT), (bar_x + bar_w + 10, p2_bar_y - 6))
 
-        # Calibration hint
-        if eeg_ready and alpha_elapsed_ms < alpha_cal_ms:
-            show_center_text(screen, "Calibrating alpha...", BLUE, font_big)
+        # Mode indicator
+        mode_text = "REAL EEG P1 + TEST P2" if eeg_ready else "FALLBACK MODE - Both Test"
+        mode_color = (100, 255, 100) if eeg_ready else (255, 100, 100)
+        screen.blit(font_small.render(mode_text, True, mode_color), (10, 80))
 
         if game_over:
             if win:
@@ -899,6 +897,7 @@ def main(serial_port: str = None):
 
         pygame.display.flip()
 
+    # EEG cleanup
     if EEG_AVAILABLE and eeg_setup is not None:
         try:
             eeg_setup.stop()
@@ -907,8 +906,12 @@ def main(serial_port: str = None):
     pygame.quit()
     sys.exit(0)
 
-
 if __name__ == "__main__":
-    # Optional: allow serial port via env var or default
-    serial = os.environ.get("BRAIN_PORT") or None
-    main(serial_port=serial)
+    import argparse
+    parser = argparse.ArgumentParser(description="Red Light Green Light with real EEG alpha/beta control for P1")
+    parser.add_argument("--port", type=str, default=None, help="Serial port like \\\\.\\COM3 (Windows) or /dev/ttyUSB0 (Linux)")
+    args = parser.parse_args()
+    
+    # Try environment variable if no CLI arg
+    serial_port = args.port or os.environ.get("BRAIN_PORT")
+    main(serial_port=serial_port)

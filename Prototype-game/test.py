@@ -433,7 +433,12 @@ def main(serial_port: str = None):
     light_timer_ms = 0
     YELLOW_MS = 800
     def next_interval_for(state: str) -> int:
-        return YELLOW_MS if state == "yellow" else random.randint(1500, 3000)
+        if state == "yellow":
+            return YELLOW_MS
+        elif state == "green":
+            return random.randint(4000, 8000)  # Extended green: 4-8 seconds (was 1.5-3 seconds)
+        else:  # red
+            return random.randint(1500, 3000)  # Keep red duration the same
     light_interval_ms = next_interval_for(light_state)
 
     running = True
